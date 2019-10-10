@@ -19,23 +19,29 @@ char *sndfExtn = ".wav";		/* file extension, if used */
 
 #include <byteswap.h>		/* for lshuffle() */
 
+/* See http://www-mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/WAVE.html */
 typedef struct wav_head {
   INT32	magic;			/* 'RIFF' */
   INT32	riffsize;		/* size of whole file excluding these 8 bytes*/
   INT32	magic1;			/* 'WAVE' */
   INT32	magic2;			/* 'fmt ' */
-  INT32	fmt_size;		/* size of fmt chunk == 16 or 18 */
+  INT32	fmt_size;		/* size of fmt chunk == 16, 18, or 40 */
   short	format;			/* 1 is PCM, 7 is ulaw, rest not known */
   short	nchns;			/* Number of channels */
   INT32	rate;			/* sampling frequency */
   INT32	aver;			/* Average bytes/sec !! */
   short	nBlockAlign;		/* (rate*nch +7)/8 */
-  short	size;			/* size of each sample (8,16,32) */
+  short	bits_per_sample;	/* size of each sample (8,16,32) */
   /* sometimes another short in here (for 18-byte fmt_size) */
+  short extension_size;         /* 0 (18-byte fmt chunk) or 22 (40-byte) */
+  /* if extensionsize == 22 ... */
+  short valid_bits_per_sample;  /* can be non-multiple of 8 */
+  INT32 speaker_position_mask;
+  short GUID_format;            /* format when first format is -2 (GUID) */
+  char GUID[14];                /* remainder of GUID */
   /* sometimes a 'fact' block in here, or whatever */
   INT32	magic3;			/* 'data' */
   INT32	datasize;		/* data chunk size */
-  INT32 padding[8];             /* extra space to allow future fields */
 } WAVHEADER;
 
 typedef struct wav_head_base {
@@ -113,7 +119,11 @@ static void FixWavHeader(WAVHEADER *wvh, int bytemode)
     wvh->rate   = lshuffle(wvh->rate, bytemode);
     wvh->aver   = lshuffle(wvh->aver, bytemode);
     wvh->nBlockAlign = wshuffle(wvh->nBlockAlign, bytemode);
-    wvh->size   = wshuffle(wvh->size, bytemode);
+    wvh->bits_per_sample = wshuffle(wvh->bits_per_sample, bytemode);
+    wvh->extension_size  = wshuffle(wvh->extension_size, bytemode);
+    wvh->valid_bits_per_sample = wshuffle(wvh->valid_bits_per_sample, bytemode);
+    wvh->speaker_position_mask = wshuffle(wvh->speaker_position_mask, bytemode);
+    wvh->GUID_format = wshuffle(wvh->GUID_format, bytemode);
     wvh->datasize = lshuffle(wvh->datasize, bytemode);
 }
 
@@ -207,6 +217,7 @@ int SFReadHdr(file, snd, infoBmax)
     if(num != rdsize)		/* couldn't get that many bytes */
 	return(SFerror = SFE_RDERR); /* .. call it a read error */
     hdr_extra += rdsize - sizeof(WAVHEAD0);
+
     /* now read ptr is at start of next chunk - 'fact' or 'data' */
 
     /* read in the chunk type and its size */
@@ -233,12 +244,49 @@ int SFReadHdr(file, snd, infoBmax)
     pwavsfh->datasize = pwavblk->size;
 
     FixWavHeader(pwavsfh, bytemode);
+    /* Validate various header size/formats */
+    switch(pwavsfh->fmt_size) {
+    case 16:
+      /* Original, short WAV header */
+      break;
+    case 18:
+      /* Has extension_size, but it's empty */
+      if (pwavsfh->extension_size != 0) {
+	fprintf(stderr,"sndfwav: fmt_size=%d but ext_size=%d\n",
+		pwavsfh->fmt_size, pwavsfh->extension_size);
+	return(SFerror = SFE_NSF);
+      }
+      break;
+    case 40:
+      if (pwavsfh->extension_size != 22) {
+	fprintf(stderr,"sndfwav: fmt_size=%d but ext_size=%d\n",
+		pwavsfh->fmt_size, pwavsfh->extension_size);
+	return(SFerror = SFE_NSF);
+      }
+      if (strcmp(pwavsfh->GUID, "\x00\x00\x00\x00\x10\x00\x80\x00\x00\xAA\x00\x38\x9B\x71")) {
+	fprintf(stderr,"sndfwav: GUID detected but is '%s'\n", pwavsfh->GUID);
+	return(SFerror = SFE_NSF);	
+      }
+      break;
+    default:
+	fprintf(stderr,"sndfwav: Unexpected fmt_size=%d\n",
+		pwavsfh->fmt_size);
+	return(SFerror = SFE_NSF);      
+    }
 
     /* Else must be ok.  Extract rest of sfheader info */
     srate = pwavsfh->rate;
     chans = pwavsfh->nchns;
     formt = pwavsfh->format;
-    size  = pwavsfh->size;
+    if (formt == -2) {
+      if (pwavsfh->fmt_size != 40 || pwavsfh->extension_size != 22) {
+	fprintf(stderr,"sndfwav: format=%d but fmt_size/ext_size=%d/%d\n",
+		formt, pwavsfh->fmt_size, pwavsfh->extension_size);
+	return(SFerror = SFE_NSF);
+      }
+      formt = pwavsfh->GUID_format;
+    }
+    size  = pwavsfh->bits_per_sample;
     if(formt != WAV_FMT_PCM && formt != WAV_FMT_ULAW)  {	/* only types of WAV we know */
 	fprintf(stderr,"sndfwav: unrecog. format %d\n",formt);
 	return(SFerror = SFE_NSF);
@@ -349,10 +397,10 @@ int SFWriteHdr(file, snd, infoBmax)
     pwavsfh->format = WAV_FMT_PCM;
     switch(snd->format)
 	{
-    case SFMT_ULAW: pwavsfh->size = 8; pwavsfh->format = WAV_FMT_ULAW; break;
-    case SFMT_CHAR:	pwavsfh->size = 8;		break;
-    case SFMT_SHORT:	pwavsfh->size = 16;	break;
-    case SFMT_LONG:	pwavsfh->size = 32;	break;
+    case SFMT_ULAW: pwavsfh->bits_per_sample = 8; pwavsfh->format = WAV_FMT_ULAW; break;
+    case SFMT_CHAR:	pwavsfh->bits_per_sample = 8;		break;
+    case SFMT_SHORT:	pwavsfh->bits_per_sample = 16;	break;
+    case SFMT_LONG:	pwavsfh->bits_per_sample = 32;	break;
     default:	    
 	fprintf(stderr,"sndfwav: format %d cannot go in WAV\n",snd->format);
 	return(SFerror = SFE_NSF);
@@ -367,8 +415,8 @@ int SFWriteHdr(file, snd, infoBmax)
 	pwavsfh->riffsize = pwavsfh->datasize + sizeof(WAVHEADER) - 8;
 	/* - 8 because riff size does not count RIFF and the size itself */
     }
-    pwavsfh->aver = snd->samplingRate * snd->channels * (pwavsfh->size/8);
-    pwavsfh->nBlockAlign = snd->channels * (pwavsfh->size/8);
+    pwavsfh->aver = snd->samplingRate * snd->channels * (pwavsfh->bits_per_sample/8);
+    pwavsfh->nBlockAlign = snd->channels * (pwavsfh->bits_per_sample/8);
     FixWavHeader(pwavsfh, bytemode);
     hedSiz = sizeof(WAVHEADER);	    /* write a whole header in any case */
     if( (num = fwrite((void *)pwavsfh, (size_t)1, (size_t)hedSiz,
