@@ -35,6 +35,7 @@ typedef struct wav_head {
   /* sometimes a 'fact' block in here, or whatever */
   INT32	magic3;			/* 'data' */
   INT32	datasize;		/* data chunk size */
+  INT32 padding[8];             /* extra space to allow future fields */
 } WAVHEADER;
 
 typedef struct wav_head_base {
@@ -197,6 +198,7 @@ int SFReadHdr(file, snd, infoBmax)
 
     /* 2007-05-15: now read rest of 'fmt ' per declared size */
     rdsize = num + lshuffle(pwavsfh->fmt_size, bytemode);
+    DBGFPRINTF((stderr, "rdsize=%LD limit %lu\n", rdsize, sizeof(WAVHEADER)));
     assert(rdsize < sizeof(WAVHEADER)); /* else will overrun buffer */
     do	{
 	red = fread(((char *)pwavsfh)+num, (size_t)1, (size_t)rdsize-num, file);

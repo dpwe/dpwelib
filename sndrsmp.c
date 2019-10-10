@@ -435,7 +435,7 @@ static long ResampleOpenFiles(inSnd, outSnd, outRate, acc, prop)
     if(chans > SNDF_MAXCHANS) {
 	fprintf(stderr,"%s: sorry, max %d channels (not %d)\n", 
 		programName, SNDF_MAXCHANS, chans);
-	return;
+	exit(1);
     }
 
     FindGoodRatio(outRate/sndGetSrate(inSnd), &ip, &op, acc);
